@@ -108,47 +108,82 @@ export const parseCSV = (csvContent: string): { results: AnalysisResult[], metad
   
   let metadata: CSVMetadata = { gender: '', age: '', fileStart: '' };
 
+  /**
+   * Converts HH:MM:SS or HH:MM:SS:mmm to total seconds.
+   * Handles variable lengths (some rows have milliseconds, some don't).
+   */
   const timeToSeconds = (timeStr: string): number => {
-    const parts = timeStr.split(':');
-    if (parts.length < 3) return 0;
+    if (!timeStr) return 0;
+    const parts = timeStr.trim().split(':');
+    
     const hours = parseInt(parts[0]) || 0;
     const minutes = parseInt(parts[1]) || 0;
     const seconds = parseInt(parts[2]) || 0;
-    const millis = parseInt(parts[3]) || 0;
-    return hours * 3600 + minutes * 60 + seconds + millis / 1000;
+    const millis = parts.length > 3 ? parseInt(parts[3]) : 0;
+    
+    // In your CSV, the 4th part is milliseconds (e.g., 426)
+    return (hours * 3600) + (minutes * 60) + seconds + (millis / 1000);
   };
 
   let fileStartSec = 0;
+
+  // 1. Extract Metadata and Global File Start Time
   if (lines.length > 1) {
     const firstDataLine = lines[1].split(',').map(f => f.trim().replace(/^"|"$/g, ''));
-    // Capture metadata from the very first data row
+    
     metadata = {
-      gender: firstDataLine[0],
-      age: firstDataLine[1],
-      fileStart: firstDataLine[2]
+      gender: firstDataLine[0] || 'Unknown',
+      age: firstDataLine[1] || 'Unknown',
+      fileStart: firstDataLine[2] || '00:00:00'
     };
-    if (metadata.fileStart) fileStartSec = timeToSeconds(metadata.fileStart);
+    
+    fileStartSec = timeToSeconds(metadata.fileStart);
   }
 
+  // 2. Parse Rows into Events
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line.trim()) continue;
+
+    // Use a regex to split by comma but ignore commas inside quotes if necessary
     const fields = line.split(',').map(f => f.trim().replace(/^"|"$/g, ''));
-    const [ , , , startTime, endTime, channelName, comment] = fields;
     
-    if (!startTime || !endTime || !channelName) continue;
-    const startSec = timeToSeconds(startTime) - fileStartSec;
-    const endSec = timeToSeconds(endTime) - fileStartSec;
-    
-    results.push({
-      window_id: `eeg_event_${i - 1}`,
-      classification: 'abnormal',
-      channel_name: channelName,
-      global_start_time_sec: startSec,
-      global_end_time_sec: endSec,
-      label: comment || 'Detected',
-      event: [{ confidence: 0.95, region_start_time_sec: startSec, region_end_time_sec: endSec }]
+    // According to your CSV structure:
+    // [0]Gender, [1]Age, [2]FileStart, [3]StartTime, [4]EndTime, [5]ChannelNames, [6]Comment
+    const startTimeStr = fields[3];
+    const endTimeStr = fields[4];
+    const channelNamesStr = fields[5];
+    const comment = fields[6];
+
+    if (!startTimeStr || !endTimeStr || !channelNamesStr) continue;
+
+    const startSec = timeToSeconds(startTimeStr) - fileStartSec;
+    const endSec = timeToSeconds(endTimeStr) - fileStartSec;
+
+    // FIX: Split the space-separated channels (e.g., "FP1 FP2 F3" -> ["FP1", "FP2", "F3"])
+    const channelList = channelNamesStr.split(/\s+/).filter(name => name.length > 0);
+
+    // Create a unique event entry for every channel mentioned in the row
+    channelList.forEach((channelName, index) => {
+      results.push({
+        window_id: `csv_evt_${i}_${index}`, 
+        classification: 'abnormal',
+        channel_name: channelName, // Individual channel name
+        global_start_time_sec: startSec,
+        global_end_time_sec: endSec,
+        label: comment || 'Detected',
+        event: [{ 
+          confidence: 1.0, 
+          region_start_time_sec: startSec, 
+          region_end_time_sec: endSec 
+        }]
+      });
     });
   }
-  return { results: results.sort((a, b) => a.global_start_time_sec - b.global_start_time_sec), metadata };
+
+  // Sort by time so the sidebar list is chronological
+  return { 
+    results: results.sort((a, b) => a.global_start_time_sec - b.global_start_time_sec), 
+    metadata 
+  };
 };
